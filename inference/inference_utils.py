@@ -22,12 +22,21 @@ def handle_chunks(wav_gen, wav_gen_prev, wav_overlap, overlap_len=1024):
 
 @torch.inference_mode()
 def synthesize_utt(
-    genVC_mdl, 
-    src_wav, 
-    tgt_audio, 
+    genVC_mdl,
+    src_wav,
+    tgt_audio=None,
+    cond_latent=None,
     seg_len=6.0):
     """Synthesize audio in chunks, used for non-streaming mode
-    The concatenation is performed at the latent feature level"""
+    The concatenation is performed at the latent feature level
+
+    Args:
+        genVC_mdl: GenVC model
+        src_wav: Source waveform
+        tgt_audio: Target audio for conditioning (optional if cond_latent is provided)
+        cond_latent: Pre-computed conditioning latent (optional, overrides tgt_audio)
+        seg_len: Segment length in seconds
+    """
     wav_gen_prev, wav_overlap = None, None
     total_wavlen = src_wav.shape[-1]
     pred_audios = []
@@ -35,9 +44,16 @@ def synthesize_utt(
 
     src_wav = src_wav.to(genVC_mdl.device)
     seg_len = int(seg_len * genVC_mdl.content_sample_rate)
+
     # get the conditioning latent
-    tgt_audio = tgt_audio.to(genVC_mdl.device)
-    cond_latent = genVC_mdl.get_gpt_cond_latents(tgt_audio, genVC_mdl.config.audio.sample_rate)
+    if cond_latent is None:
+        if tgt_audio is None:
+            raise ValueError("Either tgt_audio or cond_latent must be provided")
+        tgt_audio = tgt_audio.to(genVC_mdl.device)
+        cond_latent = genVC_mdl.get_gpt_cond_latents(tgt_audio, genVC_mdl.config.audio.sample_rate)
+    else:
+        cond_latent = cond_latent.to(genVC_mdl.device)
+
     final_latents = []
 
     for i in range(0, total_wavlen, seg_len):
@@ -134,12 +150,22 @@ def synthesize_utt_chunked(
 
 @torch.inference_mode()
 def synthesize_utt_streaming(
-    genVC_mdl, 
-    src_wav, 
-    tgt_audio, 
+    genVC_mdl,
+    src_wav,
+    tgt_audio=None,
+    cond_latent=None,
     seg_len=6.0,
     stream_chunk_size=8):
+    """Synthesize audio in streaming mode
 
+    Args:
+        genVC_mdl: GenVC model
+        src_wav: Source waveform
+        tgt_audio: Target audio for conditioning (optional if cond_latent is provided)
+        cond_latent: Pre-computed conditioning latent (optional, overrides tgt_audio)
+        seg_len: Segment length in seconds
+        stream_chunk_size: Number of tokens to generate before vocoding
+    """
     wav_gen_prev, wav_overlap = None, None
     total_wavlen = src_wav.shape[-1]
     pred_audios = []
@@ -149,9 +175,16 @@ def synthesize_utt_streaming(
 
     src_wav = src_wav.to(genVC_mdl.device)
     seg_len = int(seg_len * genVC_mdl.content_sample_rate)
+
     # get the conditioning latent
-    tgt_audio = tgt_audio.to(genVC_mdl.device)
-    cond_latent = genVC_mdl.get_gpt_cond_latents(tgt_audio, genVC_mdl.config.audio.sample_rate)
+    if cond_latent is None:
+        if tgt_audio is None:
+            raise ValueError("Either tgt_audio or cond_latent must be provided")
+        tgt_audio = tgt_audio.to(genVC_mdl.device)
+        cond_latent = genVC_mdl.get_gpt_cond_latents(tgt_audio, genVC_mdl.config.audio.sample_rate)
+    else:
+        cond_latent = cond_latent.to(genVC_mdl.device)
+
     is_begin = True
     
     for i in range(0, total_wavlen, seg_len):
