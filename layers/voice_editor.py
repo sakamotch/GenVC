@@ -80,7 +80,7 @@ class VoiceLatentEditor:
         if self.method == "pca":
             print(f"  - Total variance explained: {self.metadata['top10_variance_ratio']:.4f} (top 10)")
 
-    def edit(self, cond_latent, coefficients, preserve_norm=False):
+    def edit(self, cond_latent, coefficients, preserve_norm=False, clip_to_range=False):
         """
         潜在ベクトルを編集
 
@@ -91,6 +91,7 @@ class VoiceLatentEditor:
                 - list形式: [0.5, -0.3, 0.0, ...] (長さはn_componentsまで)
                 - float: 単一成分のみ編集 (PC1/IC1のみ)
             preserve_norm: Trueの場合、編集後のノルムを元のノルムに正規化
+            clip_to_range: Trueの場合、編集後の値を妥当な範囲にクリップ
 
         Returns:
             edited_latent: (1, 32, 1024) or (B, 32, 1024) - 編集後の潜在表現
@@ -131,10 +132,36 @@ class VoiceLatentEditor:
         # 編集ベクトルを計算: edit_vector = Σ(coef_i × component_i)
         edit_vector = torch.matmul(coef_tensor, components)  # (1024,)
 
+        # デバッグ情報
+        print(f"[VoiceEditor] coef_tensor: {coef_tensor[:5].tolist()}")  # 最初の5要素
+        print(f"[VoiceEditor] edit_vector range BEFORE scaling: [{edit_vector.min():.3f}, {edit_vector.max():.3f}]")
+        print(f"[VoiceEditor] standardized: {self.standardized}, scaler exists: {self.scaler_scale is not None}")
+
+        # 標準化されている場合、逆変換を適用
+        if self.standardized and self.scaler_scale is not None:
+            scaler_scale = self.scaler_scale.to(device)
+            edit_vector = edit_vector * scaler_scale  # スケールを戻す
+            print(f"[VoiceEditor] edit_vector range AFTER scaling: [{edit_vector.min():.3f}, {edit_vector.max():.3f}]")
+            # 注意: 平均は編集ベクトル（差分）なので加算しない
+
         # cond_latentに編集を適用
         # cond_latent: (B, 32, 1024)
         # edit_vector: (1024,) → (1, 1, 1024) にreshapeしてブロードキャスト
         edited_latent = cond_latent + edit_vector.view(1, 1, -1)
+
+        # クリッピング（オプション）
+        # 編集なし（edit_vectorが0）の場合はクリッピングしない
+        edit_norm = torch.norm(edit_vector).item()
+        if clip_to_range and edit_norm > 1e-6:  # 編集がある場合のみクリップ
+            # 元のデータの範囲を基準にクリップ
+            # より緩い範囲（元の範囲の1.5倍）を使用
+            original_min = cond_latent.min()
+            original_max = cond_latent.max()
+            margin = (original_max - original_min) * 0.25
+            clip_min = original_min - margin
+            clip_max = original_max + margin
+            edited_latent = torch.clamp(edited_latent, clip_min, clip_max)
+            print(f"[VoiceEditor] Clipped to range: [{clip_min:.3f}, {clip_max:.3f}]")
 
         # ノルム保存（オプション）
         if preserve_norm:

@@ -62,22 +62,44 @@ class VoiceEditingInterface:
             # NumPy配列からTensorに変換
             if isinstance(src_data, np.ndarray):
                 src_tensor = torch.from_numpy(src_data).float()
+                # 正規化（-1.0 ~ 1.0の範囲に）
+                if src_tensor.abs().max() > 1.0:
+                    src_tensor = src_tensor / src_tensor.abs().max()
+                # モノラル変換
                 if src_tensor.dim() == 1:
                     src_tensor = src_tensor.unsqueeze(0)
-                elif src_tensor.dim() == 2 and src_tensor.shape[0] == 2:
-                    # ステレオの場合はモノラルに変換
-                    src_tensor = src_tensor.mean(dim=0, keepdim=True)
+                elif src_tensor.dim() == 2:
+                    # (2, T) or (T, 2) のどちらか判定
+                    if src_tensor.shape[0] == 2 or src_tensor.shape[1] == 2:
+                        # ステレオをモノラルに
+                        if src_tensor.shape[0] == 2:
+                            src_tensor = src_tensor.mean(dim=0, keepdim=True)
+                        else:
+                            src_tensor = src_tensor.mean(dim=1).unsqueeze(0)
             else:
                 src_tensor = src_data
 
             if isinstance(ref_data, np.ndarray):
                 ref_tensor = torch.from_numpy(ref_data).float()
+                # 正規化（-1.0 ~ 1.0の範囲に）
+                if ref_tensor.abs().max() > 1.0:
+                    ref_tensor = ref_tensor / ref_tensor.abs().max()
+                # モノラル変換
                 if ref_tensor.dim() == 1:
                     ref_tensor = ref_tensor.unsqueeze(0)
-                elif ref_tensor.dim() == 2 and ref_tensor.shape[0] == 2:
-                    ref_tensor = ref_tensor.mean(dim=0, keepdim=True)
+                elif ref_tensor.dim() == 2:
+                    # (2, T) or (T, 2) のどちらか判定
+                    if ref_tensor.shape[0] == 2 or ref_tensor.shape[1] == 2:
+                        if ref_tensor.shape[0] == 2:
+                            ref_tensor = ref_tensor.mean(dim=0, keepdim=True)
+                        else:
+                            ref_tensor = ref_tensor.mean(dim=1).unsqueeze(0)
             else:
                 ref_tensor = ref_data
+
+            # デバッグ情報
+            print(f"Debug: src_tensor shape: {src_tensor.shape}, range: [{src_tensor.min():.3f}, {src_tensor.max():.3f}]")
+            print(f"Debug: ref_tensor shape: {ref_tensor.shape}, range: [{ref_tensor.min():.3f}, {ref_tensor.max():.3f}]")
 
             # リサンプリング
             if src_sr != self.model.content_sample_rate:
@@ -108,7 +130,13 @@ class VoiceEditingInterface:
                     coefficients[f"{prefix}{i+1}"] = float(value)
 
             # 声質編集
+            print(f"Debug: coefficients = {coefficients}")
+            print(f"Debug: cond_latent shape: {cond_latent.shape}, range: [{cond_latent.min():.3f}, {cond_latent.max():.3f}]")
+
             edited_latent = self.editor.edit(cond_latent, coefficients)
+
+            print(f"Debug: edited_latent shape: {edited_latent.shape}, range: [{edited_latent.min():.3f}, {edited_latent.max():.3f}]")
+            print(f"Debug: edit magnitude: {torch.norm(edited_latent - cond_latent).item():.6f}")
 
             progress(0.5, desc="Synthesizing audio...")
 

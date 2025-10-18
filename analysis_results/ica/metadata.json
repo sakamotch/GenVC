@@ -1,0 +1,6 @@
+{
+  "n_components": 10,
+  "standardized": false,
+  "max_iter": 1000,
+  "converged": false
+}

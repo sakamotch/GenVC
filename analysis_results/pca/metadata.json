@@ -1,0 +1,7 @@
+{
+  "n_components": 20,
+  "total_variance": 210.9622344970703,
+  "top5_variance_ratio": 0.6569482088088989,
+  "top10_variance_ratio": 0.8310304284095764,
+  "standardized": false
+}

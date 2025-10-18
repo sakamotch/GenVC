@@ -1,123 +1,775 @@
-<div align="center">
-  <img src="figures/logo.png" width="300"/> 
-</div>
+# Voice Editing Feature - Research Results
 
-<p align="center"><strong style="font-size: 22px;">
-Self-Supervised LM-Based Zero-Shot Voice Conversion
-</strong>
-</p>
+## ⚠️ 重要: PCAアプローチの限界について
 
-<p align="center">
-♠︎ <a href="https://huggingface.co/ZexinCai/GenVC">Model</a>   | ♣︎ <a href="https://github.com/caizexin/GenVC">Github</a> 
-|  ♥︎ <a href="https://arxiv.org/abs/2502.04519">Paper</a> | ♦︎ <a href="https://caizexin.github.io/GenVC/index.html">Demo</a>
-</p>
+**結論: PCAによる声質編集はGenVCにおいては効果的に機能しませんでした。**
 
-GenVC is an open-source, language model-based zero-shot voice conversion system that leverages self-supervised training and supports streaming voice conversion.
-<!-- --- -->
+このブランチでは、統計的潜在空間編集（PCA/ICA）を用いた声質編集機能の実装と検証を行いましたが、以下の理由により実用的な声質編集は達成できませんでした。
 
-## Approach
-<p align="center">
-    <img src="figures/genVC.png" width="100%"/>
-</p>
+### なぜPCAアプローチが機能しなかったか
 
+#### 1. 潜在ベクトルの抽出方法の不一致
 
-## Features
-
-✅ **Zero-shot Voice Conversion** 
-
-✅ **Streaming VC**
-
-✅ **Self-supervised Training**
-
-## Setup
-Create a new conda environment and install the required packages:
-```sh
-# Create a new Conda environment
-conda create -n genVC python=3.10
-
-# Activate the environment
-conda activate genVC
-
-# Install necessary dependencies
-pip install pip==20.3.4
-pip install transformers==4.33.0
-pip install fairseq
-pip install torch==2.3.0 torchaudio==2.3.0
-
-# Install additional requirements
-pip install -r requirements.txt
+**PCA学習時の抽出:**
+```python
+# 各話者の複数発話から平均化して固定ベクトルを作成
+speaker_vector = all_latents.mean(dim=(0, 1, 2))  # (1024,)
 ```
-We used Python 3.10, Torch 2.3, and Transformers 4.33 to train and test our models. However, the codebase is expected to be compatible with Torch versions below 2.6 and other versions of the Transformers package. Streaming inference may not be compatible with some higher versions of Transformers. The specified installation ensures that users can successfully install Fairseq without encountering [issues](https://github.com/facebookresearch/fairseq/issues/5012). 
-## Inference
-NOTE: **top_k** is one of the key hyperparameters for inference, and you can adjust it using `--top_k` to achieve better results. For streaming inference, greedy decoding is recommended; you can set top_k to 1. 
-### Available models
 
-| Model | Training Set |
-| :--------: | :--------: |
-| [`GenVC_small`](https://huggingface.co/ZexinCai/GenVC/blob/main/pre_trained/GenVC_small.pth) | [LibriTTS](https://openslr.org/60/) |
-| [`GenVC_large`](https://huggingface.co/ZexinCai/GenVC/blob/main/pre_trained/GenVC_large.pth) | [LibriTTS](https://openslr.org/60/), [MLS](https://www.openslr.org/94/), [Common Voice](https://commonvoice.mozilla.org/en)  |
-
-We recommend downloading the model and placing it in the `pre_trained/` directory.
-
-### Non-streaming inference
-```sh
-python infer.py --model_path pre_trained/GenVC_small.pth --src_wav samples/EF4_ENG_0112_1.wav --ref_audio samples/EM1_ENG_0037_1.wav --output_path samples/converted.wav
+**推論時の条件付けベクトル:**
+```python
+# 時系列の条件付けベクトル
+cond_latent = model.get_gpt_cond_latents(ref_audio, sample_rate)  # (1, 32, 1024)
 ```
-### Streaming inference
-```sh
-python infer.py --model_path pre_trained/GenVC_small.pth --src_wav samples/EF4_ENG_0112_1.wav --ref_audio samples/EM1_ENG_0037_1.wav --output_path samples/converted.wav --streaming
+
+PCAは話者間の平均的な違いを学習しているのに対し、GenVCは32個の時系列ベクトルで韻律・イントネーション情報を扱っています。
+
+#### 2. 変動の種類の不一致
+
+- **PCAが捉えた変動**: 話者間の声質の違い（ピッチレンジ、声道形状など）
+- **GenVCが期待する変動**: 同一話者内の韻律変動（抑揚、感情表現など）
+
+この根本的な不一致により、PCA編集による変化はGenVCにとって"ノイズ"または"分布外のデータ"として扱われます。
+
+#### 3. 実験結果による検証
+
+`test_latent_change.py`を用いて、様々なPC1係数での潜在ベクトルの変化量を測定:
+
+| PC1係数 | 相対変化量 | GenVCの挙動 |
+|---------|-----------|------------|
+| 0.5     | 1.11%     | 変化なし（ノイズとして無視） |
+| 1.0     | 2.22%     | 変化なし |
+| 2.0     | 4.45%     | 変化なし |
+| 5.0     | ~11%      | わずかに変化するが不安定 |
+| 10.0    | ~20%      | 生成失敗（早期のstop_audio_token） |
+
+**観察された問題:**
+- 小さい編集（係数±1.0程度）: 音声に知覚的な変化が現れない
+- 大きい編集（係数±5.0以上）: 音声生成が途中で停止、または極端に短い音声が生成される
+- 適切な範囲が存在しない: 効果が出る前に生成が不安定になる
+
+#### 4. 分布外データの問題
+
+GenVCは学習時に以下の分布のデータで訓練されています:
 ```
-#### Latency and RTF
-We evaluated the latency and real-time factor (processed time / audio length) of our model on three different GPUs, with the results presented in the table below. The streaming experiment was conducted using 1-second chunk processing, and latency was measured as the time taken for the model to generate the first audio signal after receiving an input signal. In a practical setting, the actual latency would be the sum of the audio length (1 second) and the processing latency, where the audio length represents the time required for a person to produce the speech.
-
-| GPU Type  |       |    Latency (ms)      |         |      |        |    RTF       |         |
-| :--------: | :--------: | :--------: | :--------: | :--------: | :--------: | :--------: | :--------: |
-|           | **Avg.**           | **Min** | **Max** |      | **Avg.**    | **Min** | **Max** |
-| H100      | **95.2**           | 94.5    | 96.4    |      | **0.28**    | 0.03    | 0.44    |
-| A100      | 129.7              | 123.9   | 148.4   |      | 0.38        | 0.04    | 0.73    |
-| 1080-TI   | 183.9              | 177.5   | 193.9   |      | 0.57        | 0.08    | 1.11    |
-
-
-## Training
-We highly recommend using Weights & Biases ([wandb](https://wandb.ai/site/)) to track training progress. Please refer to our [training history](https://api.wandb.ai/links/zexincai-johns-hopkins-university/0v1stvjk) as a reference for training your own model. 
-### Dataset preparation
-Download the [LibriTTS](https://openslr.org/60/) and place it in the `data/` folder. Use our prepared metadata located in `metafiles/libritts/`. Each line in the metafile follows the format: `utterance_path|spk`.
-
-### Tokenizer training
-We also provide [pretrained tokenizers](https://huggingface.co/ZexinCai/GenVC/tree/main/pre_trained).
-
-NOTE: Modify the configurations in `train_*_dvae.py` if necessary.
-```sh
-CUDA_VISIBLE_DEVICES=0 python train_audio_dvae.py
+P(audio | content_codes, cond_latent_original)
 ```
-For phonetic tokenizer training, please download the [ContentVec](https://ibm.ent.box.com/s/z1wgl1stco8ffooyatzdwsqn2psd9lrr) model and save it as pre_trained/contentVec.pt. If you’ve already downloaded the [`pre_trained`](https://huggingface.co/ZexinCai/GenVC/tree/main/pre_trained) directory from Hugging Face, no further download is necessary.
-```sh
-CUDA_VISIBLE_DEVICES=0 python train_content_dvae.py
+
+PCA編集を適用すると:
 ```
-### GenVC training
-```sh
-CUDA_VISIBLE_DEVICES=0 python train_genVC.py
+P(audio | content_codes, cond_latent_original + PCA_edit)
 ```
-### Vocoder training
-```sh
-CUDA_VISIBLE_DEVICES=0 python train_vocoder.py
+
+`cond_latent_original + PCA_edit`は訓練分布から大きく外れるため、GenVCは適切に音声を生成できません。
+
+### このブランチで得られた知見
+
+このリサーチは**negative result（否定的結果）**ですが、以下の重要な知見が得られました:
+
+1. **GenVCの条件付けメカニズムの理解**: `cond_latent`は固定的な話者埋め込みではなく、時系列の韻律情報を含む
+2. **統計的編集の限界**: 学習データ分布外の編集は生成モデルで機能しにくい
+3. **代替アプローチの必要性**: 別の方法（後述）を検討すべき
+
+### 実装されたコード
+
+このブランチには以下の完全な実装が含まれています:
+
+- `extract_latents.py` - LibriTTSから話者潜在ベクトルを抽出
+- `analyze_latent_space.py` - PCA/ICA分析と可視化
+- `layers/voice_editor.py` - 声質編集モジュール
+- `infer_with_editing.py` - 編集付き推論CLI
+- `explore_components.py` - インタラクティブなGradio UI
+- `test_latent_change.py` - 潜在ベクトル変化の検証スクリプト
+
+これらのコードは将来的な研究や別のアプローチの基盤として利用可能です。
+
+### 代替アプローチ
+
+GenVCで実用的な声質編集を実現するには、以下のアプローチが考えられます:
+
+1. **参照音声の選択・合成**
+   - 異なる参照音声を使用して声質を変える
+   - 複数の参照音声を混合（weighted average）
+
+2. **Fine-tuningベースの編集**
+   - LoRA等を用いた軽量なfine-tuning
+   - 特定の声質方向への調整を学習
+
+3. **ポストプロセッシング**
+   - 生成後の音声にピッチシフト、フォルマント変換を適用
+   - 信号処理ベースのアプローチ
+
+4. **モデルアーキテクチャの変更**
+   - 編集可能な話者埋め込みを持つモデルへの改造
+   - Disentangled representationの導入
+
+---
+
+## 概要（元の実装について）
+
+PCA/ICAを用いて潜在空間の主要な変動軸を発見し、それらの軸に沿って声質を編集します。
+
+### 基本的な仕組み
+
 ```
-## Future updates
-☑️ **Multi-GPU Training**
+[あなたの声] → 潜在ベクトル抽出 → 統計的変換 → 編集された潜在ベクトル
+                                          ↓
+[ソース音声] ← 音声生成 ← 編集された声質
+```
 
-☑️ **Causal Neural Vocoder**
+## セットアップ
 
-☑️ **Multilingual VC**
+### 1. 追加の依存関係
 
-## Impact Statement
-While our work holds significant promise, it also carries potential societal implications that warrant consideration. GenVC is a voice conversion system capable of transforming source speech into desired voices. While this technology has valuable applications, such as enhancing privacy by anonymizing voices and enabling accessibility for individuals with speech impairments, it is also presents ethical challenges. Specifically, the ability to convincingly replicate voices can be misused to create audio deepfakes, which may be employed for malicious purposes, such as identity theft, fraud, and the spread of misinformation.
+```bash
+pip install scikit-learn matplotlib seaborn gradio
+```
 
-To mitigate these risks, we strongly advocate for the responsible and ethical use of voice conversion technologies. Researchers, developers, and users must comply with relevant laws and guidelines, ensuring that these systems are used exclusively for legitimate and beneficial applications. Trans-
-parency, informed consent, and robust safeguards should be prioritized to prevent misuse and protect individuals’ rights and privacy.
+### 2. 必要なデータ
 
-## Acknowledgements
-- [Coqui-AI/Trainer](https://github.com/coqui-ai/Trainer) for the PyTorch model trainer
-- [Tortoise-TTS](https://github.com/neonbjb/tortoise-tts) and [XTTS](https://github.com/coqui-ai/TTS) for the LLM backbone
-- [Amphion](https://github.com/open-mmlab/Amphion) for providing some of the vocoder codes
-- My team members for their feedback, contributions, and support
+- LibriTTSデータセット（またはその他の多様な話者を含むデータセット）
+- 学習済みGenVCモデル
 
+### 3. LibriTTSデータセットの選択
+
+| データセット | サイズ | 話者数 | 推奨度 | 用途 |
+|------------|--------|--------|--------|------|
+| dev-clean | 1.2GB | ~40人 | ⭐⭐⭐⭐ | **クイックテスト・動作確認** |
+| train-clean-100 | 7.7GB | ~251人 | ⭐⭐⭐⭐⭐ | **実用レベル（推奨）** |
+| train-clean-360 | 27GB | ~921人 | ⭐⭐⭐⭐ | 高品質・研究用 |
+
+**推奨:** まず **dev-clean** で動作確認してから **train-clean-100** で本番実行
+
+## クイックスタート: dev-cleanで動作確認
+
+初めて使う場合は、まず小規模なdev-cleanデータセットで動作確認することを推奨します。
+
+### 準備: ディレクトリ構造
+
+```bash
+cd /path/to/GenVC
+
+# データ用ディレクトリを作成
+mkdir -p data/LibriTTS
+mkdir -p latent_data
+mkdir -p analysis_results
+mkdir -p outputs
+```
+
+### ステップ1: dev-cleanのダウンロードと展開
+
+```bash
+# データディレクトリに移動
+cd data/LibriTTS
+
+# ダウンロード（約1.2GB、5-10分）
+wget https://www.openslr.org/resources/60/dev-clean.tar.gz
+
+# 展開
+tar -xzf dev-clean.tar.gz
+
+# 構造確認
+ls -la dev-clean/
+# dev-clean/1272/, dev-clean/1673/, ... (話者IDディレクトリ)
+```
+
+### ステップ2: 潜在ベクトル抽出（30分-1時間）
+
+```bash
+# プロジェクトルートに戻る
+cd ../..
+
+# dev-cleanから潜在ベクトルを抽出
+python extract_latents.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --libritts_path data/LibriTTS \
+    --split dev-clean \
+    --output_dir latent_data \
+    --device cuda \
+    --max_audios_per_speaker 5 \
+    --min_utterances 3
+```
+
+**期待される結果:**
+- 処理時間: 30分-1時間（GPU使用時）
+- 話者数: 約30-40人
+- 出力ファイル:
+  - `latent_data/speaker_vectors.npy` (40, 1024)
+  - `latent_data/speaker_ids.json`
+  - `latent_data/metadata.json`
+
+### ステップ3: PCA/ICA分析（5-10分）
+
+```bash
+python analyze_latent_space.py \
+    --data_dir latent_data \
+    --output_dir analysis_results \
+    --n_pca_components 20 \
+    --n_ica_components 10
+```
+
+**注意:** `--standardize` フラグは使用しないでください。標準化すると逆変換時に問題が発生します。
+
+**出力ファイル:**
+- `analysis_results/pca/components.npy`
+- `analysis_results/pca_variance.png` - 寄与率グラフ
+- `analysis_results/pca_distributions.png` - 主成分の分布
+- `analysis_results/pca_scatter_matrix.png` - 散布図
+
+**可視化を確認:**
+```bash
+# Windowsの場合
+explorer.exe analysis_results/
+
+# 重要なグラフ:
+# - pca_variance.png: PC1-5で50%以上の分散を説明できていればOK
+# - pca_distributions.png: 各主成分の分布形状
+```
+
+### ステップ4: インタラクティブ探索
+
+```bash
+python explore_components.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --method pca \
+    --n_components 10 \
+    --device cuda
+```
+
+ブラウザで http://127.0.0.1:7860 を開く
+
+**試すこと:**
+1. サンプル音声をアップロード
+2. PC1を -3 → +3 に動かす（通常：性別・ピッチ）
+3. PC2を -3 → +3 に動かす（通常：明るさ）
+4. 各主成分が何を制御しているかメモを取る
+
+### ステップ5: コマンドラインでテスト
+
+```bash
+# PC1のみ調整（高い声）
+python infer_with_editing.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --src_wav samples/EF4_ENG_0112_1.wav \
+    --ref_audio samples/EM1_ENG_0037_1.wav \
+    --output_path outputs/test_high_pitch.wav \
+    --method pca \
+    --pc1 1.0
+
+# PC1のみ調整（低い声）
+python infer_with_editing.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --src_wav samples/EF4_ENG_0112_1.wav \
+    --ref_audio samples/EM1_ENG_0037_1.wav \
+    --output_path outputs/test_low_pitch.wav \
+    --method pca \
+    --pc1 -1.0
+
+# 複数成分を組み合わせ
+python infer_with_editing.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --src_wav samples/EF4_ENG_0112_1.wav \
+    --ref_audio samples/EM1_ENG_0037_1.wav \
+    --output_path outputs/test_combined.wav \
+    --method pca \
+    --pc1 0.5 --pc2 -0.3 --pc3 0.2
+```
+
+### dev-cleanの結果評価
+
+**良好な結果の目安:**
+- PC1寄与率: 12-18%
+- PC1-5累積寄与率: 45-60%
+- PC1-10累積寄与率: 65-80%
+- 声質の変化が知覚的に明確
+
+**結果が良好な場合:**
+→ train-clean-100で本番実行（より精度の高い編集が可能）
+
+**結果が微妙な場合:**
+- 係数を大きくする（±3.0まで試す）
+- train-clean-100 に移行して話者数を増やす
+- **注意**: 冒頭で説明したとおり、PCAアプローチ自体に根本的な限界があるため、改善は限定的です
+
+### train-clean-100への移行
+
+dev-cleanで動作確認できたら、より多くの話者で精度向上:
+
+```bash
+# ダウンロード（7.7GB）
+cd data/LibriTTS
+wget https://www.openslr.org/resources/60/train-clean-100.tar.gz
+tar -xzf train-clean-100.tar.gz
+
+# 抽出（2-4時間）
+cd ../..
+python extract_latents.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --libritts_path data/LibriTTS \
+    --split train-clean-100 \
+    --output_dir latent_data_100 \
+    --device cuda
+
+# 分析
+python analyze_latent_space.py \
+    --data_dir latent_data_100 \
+    --output_dir analysis_results_100 \
+    --n_pca_components 50
+```
+
+## 使用方法（詳細）
+
+### ステップ1: 潜在ベクトルの抽出
+
+LibriTTSから話者ごとの代表的な潜在ベクトルを抽出します。
+
+```bash
+python extract_latents.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --libritts_path /path/to/LibriTTS \
+    --split train-clean-100 \
+    --output_dir latent_data \
+    --max_audios_per_speaker 5
+```
+
+**出力:**
+- `latent_data/speaker_vectors.npy` - 話者ベクトルの行列 (num_speakers, 1024)
+- `latent_data/speaker_ids.json` - 話者IDリスト
+- `latent_data/metadata.json` - メタデータ
+
+**オプション:**
+- `--max_speakers N` - テスト用に最大N人の話者のみ処理
+- `--save_all_latents` - 各発話の潜在ベクトルも保存（大容量）
+
+### ステップ2: PCA/ICA分析
+
+抽出した潜在ベクトルに対してPCA/ICA分析を実行します。
+
+```bash
+# PCA分析
+python analyze_latent_space.py \
+    --data_dir latent_data \
+    --output_dir analysis_results \
+    --n_pca_components 50
+
+# ICA分析も実行する場合
+python analyze_latent_space.py \
+    --data_dir latent_data \
+    --output_dir analysis_results \
+    --n_pca_components 50 \
+    --n_ica_components 20
+```
+
+**注意:** `--standardize` は使用しないでください。標準化により逆変換時にスケーリングエラーが発生します。
+
+**出力:**
+- `analysis_results/pca/` - PCA結果
+  - `components.npy` - 主成分ベクトル (50, 1024)
+  - `explained_variance_ratio.npy` - 寄与率
+  - `metadata.json` - メタデータ
+- `analysis_results/ica/` - ICA結果（同様の構造）
+- `analysis_results/*.png` - 可視化グラフ
+
+**可視化される情報:**
+- `pca_variance.png` - 各主成分の寄与率
+- `pca_distributions.png` - 主成分の分布
+- `pca_scatter_matrix.png` - 主成分間の散布図
+
+### ステップ3: 声質編集
+
+#### 方法A: コマンドラインで推論
+
+```bash
+python infer_with_editing.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --src_wav samples/source.wav \
+    --ref_audio samples/my_voice.wav \
+    --output_path output/edited.wav \
+    --method pca \
+    --pc1 0.5 \
+    --pc2 -0.3 \
+    --pc3 0.2
+```
+
+**パラメータ説明:**
+- `--src_wav` - 変換したい音声（内容）
+- `--ref_audio` - あなたの声（ベースとなる声質）
+- `--pc1`, `--pc2`, ... - 主成分の係数（±3σの範囲を推奨）
+- `--method` - `pca` または `ica`
+- `--preserve_norm` - 編集後のノルムを保存（オプション）
+
+#### 方法B: インタラクティブ探索（推奨）
+
+Webインターフェースで対話的に編集を試すことができます。
+
+```bash
+python explore_components.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --method pca \
+    --n_components 10 \
+    --device cuda
+```
+
+ブラウザで http://127.0.0.1:7860 を開き、スライダーで主成分を調整しながらリアルタイムに音声を生成できます。
+
+**インターフェースの使い方:**
+1. ソース音声（変換したい内容）をアップロード
+2. リファレンス音声（あなたの声）をアップロード
+3. スライダーで各主成分を調整
+4. "Generate"ボタンをクリック
+5. 生成された音声を聴いて確認
+
+## 主成分の意味を理解する
+
+### 典型的な主成分の例
+
+PCA分析では、通常以下のような主成分が発見されます：
+
+- **PC1** (寄与率 ~15-20%): 性別・ピッチの高低
+  - 正の方向: 高い声、女性的
+  - 負の方向: 低い声、男性的
+
+- **PC2** (寄与率 ~8-12%): 声の明るさ・暗さ
+  - 正の方向: 明るい、軽い声
+  - 負の方向: 暗い、重い声
+
+- **PC3** (寄与率 ~5-8%): 年齢または声質の特徴
+  - 話者データによって異なる
+
+### 主成分の意味を発見する方法
+
+1. **可視化を確認**
+   - `pca_distributions.png` で各成分の分布を確認
+   - `pca_scatter_matrix.png` で成分間の関係を確認
+
+2. **試聴して確認**
+   - `explore_components.py` で1つずつ成分を調整
+   - 各成分が知覚的にどう変化するか確認
+
+3. **メモを取る**
+   - 各成分の知覚的な意味をメモ
+   - 最も有用な5~10個の成分を特定
+
+## プリセットの作成
+
+よく使う編集パターンをプリセットとして保存できます。
+
+```python
+from layers.voice_editor import VoiceLatentEditor
+
+editor = VoiceLatentEditor(method="pca")
+
+# プリセット作成
+editor.save_editing_preset(
+    preset_name="deeper_voice",
+    coefficients={"PC1": -2.0, "PC2": -0.5},
+    description="Make voice deeper and darker"
+)
+
+editor.save_editing_preset(
+    preset_name="brighter_voice",
+    coefficients={"PC1": 1.0, "PC2": 1.5},
+    description="Make voice brighter and lighter"
+)
+```
+
+プリセットを使用:
+
+```bash
+python infer_with_editing.py \
+    --model_path pre_trained/GenVC_small.pth \
+    --src_wav source.wav \
+    --ref_audio my_voice.wav \
+    --output_path output.wav \
+    --preset deeper_voice
+```
+
+## トラブルシューティング
+
+### データ抽出に関する問題
+
+#### Q: 話者数が少ない（<20人）
+
+**原因:** `--min_utterances` が高すぎる、またはデータセットが小さい
+
+**解決策:**
+```bash
+python extract_latents.py \
+    --min_utterances 2  # 3から2に下げる
+    # または
+    --max_speakers 50  # より多くの話者を処理
+```
+
+#### Q: 処理が非常に遅い
+
+**原因:** CPUを使っている、または1話者あたりの音声が多すぎる
+
+**解決策:**
+```bash
+python extract_latents.py \
+    --device cuda \  # GPUを使用
+    --max_audios_per_speaker 3  # 5から3に減らす
+```
+
+#### Q: メモリ不足エラー
+
+**原因:** バッチサイズが大きすぎる、またはGPUメモリ不足
+
+**解決策:**
+```bash
+python extract_latents.py \
+    --max_speakers 30  # 最大30人に制限してテスト
+```
+
+#### Q: エラー: "Failed to process [audio_path]"
+
+**原因:** 音声ファイルが破損、または短すぎる
+
+**解決策:**
+- 警告として表示されるだけで、他の音声は処理されます
+- 多数のエラーが出る場合は `--min_utterances` を調整
+
+### 分析に関する問題
+
+#### Q: 分析に時間がかかりすぎる
+
+**解決策:** `--max_speakers` オプションで処理する話者数を制限してください。50-100人でも十分な結果が得られます。
+
+#### Q: PCAの寄与率が低い（PC1-10で50%未満）
+
+**原因:** データセットの話者数が少ない、または話者の多様性が不足
+
+**解決策:**
+1. より大きなデータセット（train-clean-100）を使用
+2. dev-cleanの場合は正常（話者数が少ないため）
+3. **注意**: 寄与率が低くても、PCAアプローチ自体の限界により声質編集の効果は限定的です
+
+#### Q: 可視化グラフが表示されない
+
+**原因:** matplotlib のバックエンド問題
+
+**解決策:**
+```bash
+# グラフファイルは保存されているので、画像ビューアで開く
+ls analysis_results/*.png
+```
+
+### 音声編集に関する問題
+
+#### Q: 編集しても変化が少ない
+
+**原因:** 係数が小さすぎる、または話者データが少ない
+
+**解決策:**
+1. 係数を大きくする（±3.0まで試す）
+2. `--preserve_norm` フラグを外す
+3. より大きなデータセット（train-clean-100）で再分析
+
+```bash
+python infer_with_editing.py \
+    --pc1 3.0  # 係数を大きくする
+    # --preserve_norm を削除
+```
+
+#### Q: 編集後の音声が不自然・歪む
+
+**原因:** 係数が大きすぎる
+
+**解決策:**
+- ±3σの範囲内（通常±2.0程度）に抑える
+- 複数の成分を同時に大きく動かしすぎない
+- `--preserve_norm` を試す
+
+#### Q: どの主成分が重要か分からない
+
+**解決策:**
+1. `explore_components.py` を使って、1つずつ成分を動かして聴く
+2. 寄与率が高い（PC1, PC2, PC3など）ものから試す
+3. メモを取りながら各成分の知覚的な効果を記録
+
+```bash
+# 各成分を単独でテスト
+python infer_with_editing.py --pc1 2.0 --output_path test_pc1.wav
+python infer_with_editing.py --pc2 2.0 --output_path test_pc2.wav
+python infer_with_editing.py --pc3 2.0 --output_path test_pc3.wav
+```
+
+#### Q: ICAとPCA、どちらを使うべきか
+
+**推奨:** まずPCAから試す
+
+**理由:**
+- PCAは寄与率が明確で解釈しやすい
+- ICAは統計的に独立な成分を見つけるが、重要度の順序付けがない
+
+**使い分け:**
+- PCA: 全体的な変動を理解したい場合
+- ICA: より独立した声質特徴を発見したい場合
+
+### Gradioインターフェースに関する問題
+
+#### Q: ブラウザで開けない
+
+**解決策:**
+```bash
+# ポートを変更
+python explore_components.py --port 8080
+
+# または別のマシンからアクセス
+python explore_components.py --share  # 公開URLを生成
+```
+
+#### Q: 音声生成が遅い
+
+**原因:** CPUで実行している、またはモデルが大きい
+
+**解決策:**
+```bash
+python explore_components.py --device cuda
+# または GenVC_small.pth を使用
+```
+
+#### Q: アップロードした音声がエラーになる
+
+**原因:** サンプリングレートが極端、またはステレオ音声
+
+**解決策:**
+- モノラル音声を使用
+- サンプリングレート: 16kHz-48kHzを推奨
+- 形式: WAVファイルを推奨
+
+### その他の問題
+
+#### Q: CUDA out of memory エラー
+
+**解決策:**
+```bash
+# より小さいモデルを使用
+--model_path pre_trained/GenVC_small.pth
+
+# バッチサイズを減らす（extract_latents.pyの場合）
+--max_audios_per_speaker 3
+```
+
+#### Q: 結果の再現性がない
+
+**原因:** GenVCモデル自体がサンプリングベース
+
+**解決策:**
+```bash
+# top_kを1に設定（greedy decoding）
+python infer_with_editing.py --top_k 1
+```
+
+#### Q: 自分の声で試したら期待と違う結果になる
+
+**原因:**
+1. 自分の声が学習データの分布外
+2. 参照音声が短すぎる
+3. 声質編集の方向が期待と異なる
+
+**解決策:**
+1. より長い参照音声を使用（3-5秒以上）
+2. 複数の自分の発話で試す
+3. `explore_components.py` で試行錯誤して最適な係数を見つける
+
+## 高度な使い方
+
+### Pythonスクリプトから直接使用
+
+```python
+import torch
+from inference.model_init import model_init
+from inference.inference_utils import synthesize_utt
+from layers.voice_editor import VoiceLatentEditor
+from utils import load_audio
+
+# モデルとエディタの初期化
+model, config = model_init("pre_trained/GenVC_small.pth", "cuda")
+editor = VoiceLatentEditor(method="pca", analysis_dir="analysis_results")
+
+# 音声読み込み
+src_wav = load_audio("source.wav", model.content_sample_rate)
+ref_audio = load_audio("my_voice.wav", config.audio.sample_rate)
+
+# 潜在ベクトル抽出
+ref_audio = ref_audio.to(model.device)
+cond_latent = model.get_gpt_cond_latents(ref_audio, config.audio.sample_rate)
+
+# 編集
+edited_latent = editor.edit(cond_latent, {"PC1": 1.0, "PC2": -0.5})
+
+# 合成
+synthesized = synthesize_utt(model, src_wav, cond_latent=edited_latent)
+
+# 保存
+import torchaudio
+torchaudio.save("output.wav", synthesized.unsqueeze(0).cpu(), config.audio.sample_rate)
+```
+
+### バッチ処理
+
+複数の音声を一度に処理:
+
+```python
+import glob
+from pathlib import Path
+
+src_files = glob.glob("inputs/*.wav")
+coefficients = {"PC1": 0.5, "PC2": -0.3}
+
+for src_file in src_files:
+    src_wav = load_audio(src_file, model.content_sample_rate)
+    synthesized = synthesize_utt(model, src_wav, cond_latent=edited_latent)
+
+    output_path = Path("outputs") / Path(src_file).name
+    torchaudio.save(str(output_path), synthesized.unsqueeze(0).cpu(), config.audio.sample_rate)
+```
+
+## 実装の詳細
+
+### ファイル構成
+
+```
+GenVC/
+├── extract_latents.py          # ステップ1: 潜在ベクトル抽出
+├── analyze_latent_space.py     # ステップ2: PCA/ICA分析
+├── infer_with_editing.py       # ステップ3: 編集付き推論
+├── explore_components.py       # インタラクティブ探索UI
+├── layers/
+│   └── voice_editor.py         # 声質編集モジュール
+└── inference/
+    └── inference_utils.py      # 修正: cond_latent受け取り対応
+```
+
+### データフロー
+
+```
+LibriTTS → extract_latents.py → speaker_vectors.npy (N, 1024)
+                                        ↓
+                            analyze_latent_space.py
+                                        ↓
+                        PCA/ICA components (50, 1024)
+                                        ↓
+                                voice_editor.py
+                                        ↓
+自分の声 → cond_latent → 編集 → edited_latent → GenVC → 出力音声
+```
+
+## 今後の拡張案
+
+- [ ] より多様なデータセットでの分析
+- [ ] 意味のある成分への自動ラベリング
+- [ ] ユーザーフィードバックを用いた半教師あり学習
+- [ ] リアルタイム処理の最適化
+- [ ] 感情や話し方のスタイル編集
+
+## 参考文献
+
+- PCA: Jolliffe, I. T. (2002). Principal component analysis.
+- ICA: Hyvärinen, A., & Oja, E. (2000). Independent component analysis.
+- GenVC: [Original GenVC paper](https://arxiv.org/abs/2502.04519)
+
+## ライセンス
+
+このコードは元のGenVCプロジェクトと同じライセンスに従います。

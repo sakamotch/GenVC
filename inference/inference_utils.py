@@ -81,7 +81,17 @@ def synthesize_utt(
             output_attentions=False,
         )[0]
 
-        gen_codes = gen_codes[(gen_codes!=genVC_mdl.gpt.stop_audio_token).nonzero().squeeze()]
+        # stop_audio_tokenを除去
+        gen_codes_filtered = gen_codes[(gen_codes!=genVC_mdl.gpt.stop_audio_token).nonzero().squeeze()]
+
+        # デバッグ情報
+        if gen_codes.shape[-1] != gen_codes_filtered.shape[-1]:
+            stop_pos = (gen_codes==genVC_mdl.gpt.stop_audio_token).nonzero()
+            if len(stop_pos) > 0:
+                print(f"Warning: stop_audio_token detected at position {stop_pos[0].item()}/{gen_codes.shape[-1]}")
+                print(f"  Content length: {content_codes.shape[-1]}, Generated length: {gen_codes_filtered.shape[-1]}")
+
+        gen_codes = gen_codes_filtered
         expected_output_len = torch.tensor([gen_codes.shape[-1] * genVC_mdl.config.model_args.gpt_code_stride_len], device=genVC_mdl.device)
         content_len = torch.tensor([content_codes.shape[-1]], device=genVC_mdl.device)
         acoustic_latents = genVC_mdl.gpt(content_codes,
